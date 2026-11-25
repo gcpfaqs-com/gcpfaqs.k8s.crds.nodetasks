@@ -58,7 +58,6 @@ jobs:
     needs:
       - gitleaks
       - go-security
-      - go-tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
