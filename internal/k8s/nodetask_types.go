@@ -7,7 +7,7 @@ import (
 )
 
 // GroupVersion identifica el grupo API y la versión del recurso NodeTask.
-var GroupVersion = schema.GroupVersion{Group: "ops.ejemplo.local", Version: "v1alpha1"}
+var GroupVersion = schema.GroupVersion{Group: "gcpfaqs.k8s.crds.nodetasks", Version: "v1alpha1"}
 
 // NodeTaskSpec define la especificación deseada del recurso NodeTask que el usuario escribe en el YAML (campo "spec").
 // Se usa dentro de NodeTask para indicar sobre qué nodos actuar (NodeSelector), qué operación ejecutar (Operation), qué parámetros pasar (Options) y si ejecutar en modo simulación sin aplicar cambios (DryRun).

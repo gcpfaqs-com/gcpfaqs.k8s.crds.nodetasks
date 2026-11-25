@@ -1,165 +1,123 @@
-# `node-task` Operator (`gcpfaqs.k8s.crds.nodetasks`)
+## 1. Cluster nodo master
 
-Operador de Kubernetes en Go basado en `controller-runtime` que observa recursos personalizados `NodeTask` (`ops.ejemplo.local/v1alpha1`), resuelve nodos objetivo por etiquetas (`nodeSelector`), construye comandos normalizados según la operación solicitada (`system.service.cron`, `system.update`, `node.test`) y los ejecuta de forma remota mediante `ansible` por SSH.
+Ejecuta estos pasos en el nodo master (por ejemplo, `prometheus` en `192.168.1.200`):
+
+1. **Instala MicroK8s:**
+```bash
+sudo snap install microk8s --classic
+
+```
+
+
+*Verificación:* `microk8s status --wait-ready` muestra `microk8s is running`.
+2. **Añade el usuario `markitos` al grupo `microk8s` y exporta su `kubeconfig`:**
+```bash
+sudo usermod -aG microk8s markitos
+mkdir -p /home/markitos/.kube
+sudo microk8s config > /home/markitos/.kube/config
+sudo chown -R markitos:markitos /home/markitos/.kube
+chmod 600 /home/markitos/.kube/config
+
+```
+
+
+*Verificación:* Cierra y abre sesión con `markitos` (o ejecuta `newgrp microk8s`) y comprueba `microk8s.kubectl get nodes` con estado `Ready`.
+3. **Configura `KUBECONFIG` y el alias `kubectl` para las sesiones:**
+```bash
+echo 'export KUBECONFIG=/home/markitos/.kube/config' | sudo tee -a /etc/bash.bashrc
+echo 'alias kubectl="microk8s.kubectl"' | sudo tee -a /etc/bash.bashrc
+source /etc/bash.bashrc
+
+```
+
+
+*Verificación:* `kubectl get nodes` responde sin errores.
+4. **Genera la clave SSH en `/etc/ssh/` del host donde correrá el operador y Ansible:**
+```bash
+sudo ssh-keygen -t ed25519 -C "ansible-gcp-lab" -f /etc/ssh/ansible_gcp_lab
+sudo chown markitos:markitos /etc/ssh/ansible_gcp_lab /etc/ssh/ansible_gcp_lab.pub
+sudo chmod 600 /etc/ssh/ansible_gcp_lab
+sudo chmod 644 /etc/ssh/ansible_gcp_lab.pub
+
+```
+
+
+*Verificación:* `ls -la /etc/ssh/ansible_gcp_lab*` muestra `-rw-------` (`600`) en la clave privada y `-rw-r--r--` (`644`) en la pública, ambas con propietario `markitos:markitos`.
 
 ---
 
-## 1. Arquitectura y estructura del proyecto
+## 2. Cluster nodos worker
 
-El proyecto separa la definición y resolución de recursos de Kubernetes, el despacho y construcción de operaciones, el transporte con Ansible y la reconciliación:
+En cada nodo worker (y también en el master si el master va a ser objetivo de `NodeTask`), el operador conecta por SSH con el usuario `markitos` y usa `sudo` sin contraseña (`NOPASSWD`) para ejecutar tareas con `become: true`.
 
-```text
-node-task/
-├── go.mod
-├── cmd/
-│   └── main.go
-├── internal/
-│   ├── controller/
-│   │   └── reconciler.go
-│   ├── k8s/
-│   │   ├── nodetask_types.go
-│   │   └── node_resolver.go
-│   ├── operations/
-│   │   ├── factory.go
-│   │   ├── cron.go
-│   │   ├── update.go
-│   │   └── node_test.go
-│   └── runner/
-│       └── ansible_runner.go
-└── manifests/
-    ├── nodetask-crd.yaml
-    ├── test-cron-dryrun.yaml
-    ├── test-update-dryrun.yaml
-    └── test-node-syslog.yaml
+1. **Crea el usuario `markitos` y prepara su directorio `.ssh` en el nodo worker:**
+```bash
+sudo useradd -m -s /bin/bash markitos
+sudo mkdir -p /home/markitos/.ssh
+sudo chown -R markitos:markitos /home/markitos/.ssh
+sudo chmod 700 /home/markitos/.ssh
 
 ```
 
-### Responsabilidad de cada paquete y fichero
 
-* **`cmd/main.go`:** Registra `NodeTask` y `NodeTaskList` en el `runtime.Scheme`, crea el `Manager` de `controller-runtime`, instancia dependencias (`KubeNodeResolver`, `operations.Registry` con los manejadores registrados y `AnsibleRunner`) e inicia el bucle de reconciliación.
-* **`internal/k8s/nodetask_types.go`:** Define `GroupVersion` (`ops.ejemplo.local/v1alpha1`), `NodeTaskSpec` (`nodeSelector`, `operation`, `options`, `dryRun`), `NodeTaskStatus` (`phase`, `message`), `NodeTask`, `NodeTaskList` y sus implementaciones de `DeepCopyObject()`.
-* **`internal/k8s/node_resolver.go`:** Define `NodeResolver` e implementa `KubeNodeResolver`, que lista los `Node` filtrando por `client.MatchingLabels(selector)` y extrae la IP (`NodeInternalIP` o `NodeExternalIP`) de cada nodo.
-* **`internal/operations/factory.go`:** Define `Command` (`Module`, `Args`, `Become`), la interfaz `Handler` (`Name()`, `Build(options)`) y `Registry` (mapa indexado por nombre de operación con `NewRegistry` y `Get`).
-* **`internal/operations/cron.go`:** Implementa `CronServiceHandler` para la operación `system.service.cron`, validando `options["action"]` (`restart`, `reload`, `start`, `stop`) y generando la llamada a `ansible.builtin.service` con `Become: true`.
-* **`internal/operations/update.go`:** Implementa `SystemUpdateHandler` para `system.update` usando `ansible.builtin.apt` (`upgrade=dist update_cache=yes`) con `Become: true`.
-* **`internal/operations/node_test.go`:** Implementa `NodeTestHandler` para `node.test`. No admite opciones (`len(options) > 0` devuelve error) y ejecuta con `Become: true` el comando `echo "hello crd" > /var/log/syslog` mediante `ansible.builtin.shell`.
-* **`internal/runner/ansible_runner.go`:** Define `Runner` e implementa `AnsibleRunner`. Crea un inventario temporal en disco, añade `--become` si `cmd.Become` es `true`, añade `--check` si `dryRun` es `true`, ejecuta `ansible` y borra el inventario temporal al terminar.
-* **`internal/controller/reconciler.go`:** Implementa `NodeTaskReconciler.Reconcile()` para leer el `NodeTask`, obtener el `Handler` en `Registry`, construir `Command`, resolver nodos, ejecutar `AnsibleRunner.Run()` y registrar la salida en los logs.
+*Verificación:* `id markitos` y `ls -ld /home/markitos/.ssh` confirman el usuario y los permisos `drwx------` (`700`).
+2. **Configura `NOPASSWD` en `sudoers` para `markitos` en el nodo worker:**
+```bash
+echo "markitos ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/markitos
+sudo chmod 0440 /etc/sudoers.d/markitos
+sudo visudo -cf /etc/sudoers.d/markitos
+
+```
+
+
+*Verificación:* `sudo -n true` como `markitos` sale con código `0` sin pedir contraseña.
+3. **Copia la clave pública `/etc/ssh/ansible_gcp_lab.pub` desde el host del operador al worker:**
+```bash
+ssh-copy-id -i /etc/ssh/ansible_gcp_lab.pub markitos@<IP_WORKER>
+
+```
+
+
+*Verificación:* Desde el host donde está `/etc/ssh/ansible_gcp_lab`, ejecuta:
+```bash
+ssh -i /etc/ssh/ansible_gcp_lab markitos@<IP_WORKER> 'sudo -n id'
+
+```
+
+
+Debe devolver `uid=0(root)` sin pedir contraseña.
+4. **Une el nodo worker al clúster MicroK8s (si va a formar parte del clúster de Kubernetes):**
+En el master, genera el comando de unión:
+```bash
+microk8s add-node
+
+```
+
+
+En el worker (tras instalar MicroK8s con `sudo snap install microk8s --classic`), ejecuta el comando `microk8s join ...` que devolvió el master.
+*Verificación:* En el master, `kubectl get nodes` muestra el worker en estado `Ready`.
+5. **Etiqueta los nodos que quieres que coincidan con `spec.nodeSelector`:**
+```bash
+kubectl label node <NOMBRE_NODO> task-test=true
+
+```
+
+
+*Verificación:* `kubectl get nodes --show-labels` muestra `task-test=true` en los nodos seleccionados.
 
 ---
 
-## 2. Código de la operación `node.test` y registro en `main.go`
+## 3. Instalación del CRD
 
-### `internal/operations/node_test.go`
-
-```go
-package operations
-
-import "fmt"
-
-// NodeTestHandler implementa Handler para la operación "node.test".
-// Se registra en main() dentro de Registry y se invoca desde Reconcile() cuando task.Spec.Operation vale "node.test".
-// No admite opciones en spec.options para mantener la prueba fija y predecible.
-type NodeTestHandler struct{}
-
-// Name devuelve el identificador de operación "node.test" para comprobar conectividad y escritura en /var/log/syslog.
-func (h *NodeTestHandler) Name() string {
-	return "node.test"
-}
-
-// Build valida que no se envíen opciones y construye el comando de Ansible con privilegios para escribir en /var/log/syslog.
-func (h *NodeTestHandler) Build(options map[string]string) (Command, error) {
-	if len(options) > 0 {
-		return Command{}, fmt.Errorf("operation %s does not accept options", h.Name())
-	}
-
-	return Command{
-		Module: "ansible.builtin.shell",
-		Args:   `/bin/sh -c 'echo "hello crd" > /var/log/syslog'`,
-		Become: true,
-	}, nil
-}
-
-```
-
-### Registro en `cmd/main.go`
-
-```go
-	reconciler := &controller.NodeTaskReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Resolver: k8s.NewKubeNodeResolver(mgr.GetClient()),
-		Registry: operations.NewRegistry(
-			&operations.CronServiceHandler{},
-			&operations.SystemUpdateHandler{},
-			&operations.NodeTestHandler{},
-		),
-		Runner: runner.NewAnsibleRunner("ubuntu", "/etc/ssh/id_rsa"),
-	}
-
-```
-
----
-
-## 3. Requisitos previos en la máquina local y en el clúster MicroK8s
-
-1. **Módulo Go:** Nombre de módulo `gcpfaqs.k8s.crds.nodetasks` en `go.mod` y dependencias descargadas.
-2. **Binario `ansible` y clave SSH:** `ansible` instalado en el `PATH` de la máquina donde ejecutas el controlador, clave privada accesible (por ejemplo `/etc/ssh/id_rsa` con permisos `600`) y acceso SSH con el usuario configurado (`ubuntu`) hacia los nodos del clúster.
-3. **Acceso de red a las IPs de los nodos:** `KubeNodeResolver` toma la primera dirección `NodeInternalIP` o `NodeExternalIP` de cada `Node`. La máquina que ejecuta `ansible` debe poder alcanzar por SSH esas IPs.
-4. **Clúster MicroK8s remoto:** `KUBECONFIG` apuntando al clúster MicroK8s con `server:` configurado a la IP accesible de la máquina remota.
-
----
-
-## 4. Poner en marcha paso a paso
-
-### Paso 1: inicializar módulo, descargar dependencias y compilar
-
-```bash
-cd ~/development/gcpfaqs-k8s-crds/node-task
-go mod init gcpfaqs.k8s.crds.nodetasks
-go mod tidy
-go build ./...
-
-```
-
-### Paso 2: verificar `ansible`, clave SSH y conectividad con el nodo
-
-```bash
-ansible --version
-ls -la /etc/ssh/id_rsa
-chmod 600 /etc/ssh/id_rsa
-ssh -i /etc/ssh/id_rsa ubuntu@<IP_DEL_NODO>
-
-```
-
-### Paso 3: configurar `KUBECONFIG` hacia MicroK8s
-
-En la máquina remota de MicroK8s:
-
-```bash
-microk8s config > ~/microk8s-config.yaml
-
-```
-
-Copia el archivo a tu máquina local (por ejemplo `~/.kube/microk8s.yaml`), verifica que `server:` apunta a la IP de la máquina remota y exporta la variable:
-
-```bash
-export KUBECONFIG=~/.kube/microk8s.yaml
-kubectl get nodes --show-labels
-
-```
-
-### Paso 4: crear y aplicar el CRD `NodeTask`
-
-Crea `manifests/nodetask-crd.yaml`:
+Asegúrate de que el `GroupVersion` en Go (`gcpfaqs.k8s.crds.nodetasks` y `v1alpha1`) coincide con `metadata.name`, `spec.group` y `versions[0].name` del CRD (`manifests/nodetask-crd.yaml`):
 
 ```yaml
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: nodetasks.ops.ejemplo.local
+  name: nodetasks.gcpfaqs.k8s.crds.nodetasks
 spec:
-  group: ops.ejemplo.local
+  group: gcpfaqs.k8s.crds.nodetasks
   names:
     kind: NodeTask
     listKind: NodeTaskList
@@ -201,44 +159,23 @@ spec:
 
 ```
 
-Aplica el CRD y comprueba que existe:
+Aplica el CRD:
 
 ```bash
 kubectl apply -f manifests/nodetask-crd.yaml
-kubectl get crd nodetasks.ops.ejemplo.local
 
 ```
 
-### Paso 5: etiquetar un nodo de prueba
-
-```bash
-kubectl label node <nombre-del-nodo> task-test=true
-
-```
-
-### Paso 6: arrancar el controlador con `go run`
-
-Con `KUBECONFIG` exportado:
-
-```bash
-go run ./cmd/main.go
-
-```
-
-Mantén esta terminal abierta para ver los logs estructurados (`reconciling node task`, `executing ansible operation`, `ansible output`, `node task completed`).
+*Verificación:* `kubectl get crd nodetasks.gcpfaqs.k8s.crds.nodetasks` devuelve el CRD registrado.
 
 ---
 
-## 5. Ejemplos y pruebas de `NodeTask`
+## 4. Creación del recurso de test
 
-Empieza siempre con `dryRun: true` para validar selección de nodos, SSH y construcción de comandos sin modificar el sistema.
-
-### Ejemplo 1: `node.test` en modo `dryRun: true` y luego ejecución real (`dryRun: false`)
-
-Crea `manifests/test-node-syslog.yaml`:
+Crea el manifiesto `etc/test-node-syslog.yaml` empezando con `dryRun: true` para validar la selección de nodos y la ejecución de Ansible antes de escribir en `/var/log/syslog`:
 
 ```yaml
-apiVersion: ops.ejemplo.local/v1alpha1
+apiVersion: gcpfaqs.k8s.crds.nodetasks/v1alpha1
 kind: NodeTask
 metadata:
   name: test-node-syslog
@@ -251,82 +188,60 @@ spec:
 
 ```
 
-Aplica y revisa los logs:
+Aplica el recurso:
 
 ```bash
-kubectl apply -f manifests/test-node-syslog.yaml
+kubectl apply -f etc/test-node-syslog.yaml
 
 ```
 
-Para ejecutarlo realmente en el nodo, cambia `dryRun: false` en `manifests/test-node-syslog.yaml` y vuelve a aplicarlo:
-
-```bash
-kubectl apply -f manifests/test-node-syslog.yaml
-
-```
-
-*(Nota: `>` sobrescribe `/var/log/syslog` cuando `dryRun: false`; usa `>>` si prefieres anexar al final. En sistemas con `systemd-journald` sin `rsyslog`, revisa si el fichero existe o consulta `ansible output` en los logs del controlador.)*
-
-### Ejemplo 2: `system.service.cron` con opción `action`
-
-Crea `manifests/test-cron-dryrun.yaml`:
-
-```yaml
-apiVersion: ops.ejemplo.local/v1alpha1
-kind: NodeTask
-metadata:
-  name: test-cron-dryrun
-  namespace: default
-spec:
-  nodeSelector:
-    task-test: "true"
-  operation: system.service.cron
-  options:
-    action: restart
-  dryRun: true
-
-```
-
-Aplícalo con:
-
-```bash
-kubectl apply -f manifests/test-cron-dryrun.yaml
-
-```
-
-### Ejemplo 3: `system.update` en modo simulación
-
-Crea `manifests/test-update-dryrun.yaml`:
-
-```yaml
-apiVersion: ops.ejemplo.local/v1alpha1
-kind: NodeTask
-metadata:
-  name: test-update-dryrun
-  namespace: default
-spec:
-  nodeSelector:
-    task-test: "true"
-  operation: system.update
-  dryRun: true
-
-```
-
-Aplícalo con:
-
-```bash
-kubectl apply -f manifests/test-update-dryrun.yaml
-
-```
+*Verificación:* `kubectl get nodetask test-node-syslog` muestra el recurso creado en el namespace `default`.
 
 ---
 
-## 6. Limpieza tras las pruebas
+## 5. Instalación y ejecución del operador
 
-```bash
-kubectl delete nodetask test-node-syslog test-cron-dryrun test-update-dryrun --ignore-not-found
-kubectl label node <nombre-del-nodo> task-test-
+1. **Configura en `cmd/main.go` el logger y el `AnsibleRunner` con `/etc/ssh/ansible_gcp_lab`:**
+```go
+import (
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+)
+
+func main() {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
+	// ...
+	Runner: runner.NewAnsibleRunner("markitos", "/etc/ssh/ansible_gcp_lab"),
+	// ...
+}
 
 ```
 
-Detén el proceso `go run ./cmd/main.go` con `Ctrl+C`.
+
+*Verificación:* Al arrancar el operador, se muestran los logs de `controller-runtime` y del reconciliador.
+2. **Ejecuta el operador desde el directorio del proyecto:**
+```bash
+cd /home/markitos/development/gcpfaqs-k8s-crds/nodetasks
+go run cmd/main.go
+
+```
+
+
+*Verificación:* Con `dryRun: true`, en los logs ves `reconciling node task`, `executing ansible operation`, `SKIPPED` por `--check` y `node task completed`.
+3. **Pasa a ejecución real cambiando `dryRun: false` y reaplicando el manifiesto:**
+Edita `etc/test-node-syslog.yaml` con `dryRun: false` y ejecuta:
+```bash
+kubectl apply -f etc/test-node-syslog.yaml
+
+```
+
+
+*Verificación:* En los logs del operador ves la ejecución completada y en el nodo destino compruebas `/var/log/syslog` con `tail -n 5 /var/log/syslog` (recuerda que `>` sobrescribe el archivo; usa `>>` en `internal/operations/node_test.go` si prefieres anexar).
+
+---
+
+## Detalles extra útiles para el laboratorio
+
+* **Limpiar o repetir pruebas:** Si quieres volver a disparar una reconciliación limpia o cambiar de etiquetas, puedes borrar y recrear el objeto con `kubectl delete -f etc/test-node-syslog.yaml && kubectl apply -f etc/test-node-syslog.yaml`, o cambiar `spec.nodeSelector` y la etiqueta del nodo con `kubectl label node <NOMBRE_NODO> task-test=false --overwrite`.
+* **Evitar `spec.nodeSelector` vacío:** No dejes `nodeSelector: {}` en operaciones que escriben archivos o modifican sistemas, ya que seleccionaría todos los nodos del clúster.
+* **Desplegar como deployment dentro del clúster (opcional):** Cuando quieras dejarlo corriendo como pod en vez de `go run cmd/main.go`, construye la imagen con un tag de versión (`v*`), súbela a tu registry y monta `/etc/ssh/ansible_gcp_lab` mediante un Secret o volumen en el Pod del controlador con RBAC para `nodes` (list/get/watch) y `nodetasks` (get/list/watch/update/patch).

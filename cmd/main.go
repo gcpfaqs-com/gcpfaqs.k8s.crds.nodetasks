@@ -19,11 +19,13 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 // main inicializa el esquema de Kubernetes, registra NodeTask y NodeTaskList, crea el Manager del controlador, registra los manejadores de operaciones y arranca el bucle de reconciliación.
 // Inyecta las dependencias concretas (resolvedor de nodos, registro de operaciones y ejecutor de Ansible).
 func main() {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	scheme.AddKnownTypes(k8s.GroupVersion, &k8s.NodeTask{}, &k8s.NodeTaskList{})
@@ -43,7 +45,7 @@ func main() {
 			&operations.SystemUpdateHandler{},
 			&operations.NodeTestHandler{},
 		),
-		Runner: runner.NewAnsibleRunner("ubuntu", "/etc/ssh/id_rsa"),
+		Runner: runner.NewAnsibleRunner("markitos", "/etc/ssh/ansible_gcp_lab"),
 	}
 
 	if err := ctrl.NewControllerManagedBy(mgr).

@@ -1,0 +1,10 @@
+apiVersion: gcpfaqs.k8s.crds.nodetasks/v1alpha1
+kind: NodeTask
+metadata:
+  name: test-node-syslog
+  namespace: default
+spec:
+  nodeSelector:
+    task-test: "true"
+  operation: node.test
+  dryRun: true
