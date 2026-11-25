@@ -1,4 +1,4 @@
-name: Security scans
+name: Appsec
 
 on:
   push:
@@ -8,18 +8,24 @@ on:
       - "**"
   pull_request:
 
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
 jobs:
   gitleaks:
-    name: Gitleaks (full Git history)
+    name: Gitleaks full Git history
     runs-on: ubuntu-latest
     steps:
       - name: Checkout full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Scan secrets with Gitleaks CLI
         run: |
           docker run --rm -v "${{ github.workspace }}:/repo" zricethezav/gitleaks:latest git /repo -v --exit-code 1
@@ -34,18 +40,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.27.4"
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: |
-            go.mod
-            go.sum
-            go-1.27.4
 
       - name: Install Snyk CLI
         run: npm install --global snyk
 
-      - name: Run Snyk dependency scan (high and critical)
+      - name: Run Snyk dependency scan high and critical
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk test --severity-threshold=high
@@ -53,5 +54,5 @@ jobs:
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
-      - name: Run gosec (high and critical)
+      - name: Run gosec high and critical
         run: "$(go env GOPATH)/bin/gosec -severity high ./..."
